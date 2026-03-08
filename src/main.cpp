@@ -60,7 +60,7 @@ static bool isHazard(GameObject* obj) {
     if (!obj) return false;
     if (obj->m_objectType == GameObjectType::Decoration) return false;
     // Ignorar objetos con NoTouch (no colisionan con el jugador)
-    if (obj->m_noTouch) return false;
+    if (obj->m_isNoTouch) return false;
     return HAZARD_IDS.count(obj->m_objectID) > 0;
 }
 
@@ -68,7 +68,7 @@ static bool isSolidObstacle(GameObject* obj) {
     if (!obj) return false;
     if (obj->m_objectType != GameObjectType::Solid) return false;
     // Ignorar NoTouch
-    if (obj->m_noTouch) return false;
+    if (obj->m_isNoTouch) return false;
     return true;
 }
 
@@ -147,7 +147,7 @@ class $modify(AIPlayLayer, PlayLayer) {
             if (!obj) continue;
             if (!obj->isVisible()) continue;
             if (obj->m_objectType == GameObjectType::Decoration) continue;
-            if (obj->m_noTouch) continue;   // ignorar NoTouch
+            if (obj->m_isNoTouch) continue;   // ignorar NoTouch
 
             checked++;
 
@@ -217,7 +217,7 @@ class $modify(AIPlayLayer, PlayLayer) {
 // ============================================================
 
 // Input node helper - recibe texto y llama callback
-class TextInputDelegate : public CCTextFieldDelegate {
+class AITextInputDelegate : public CCTextFieldDelegate {
 public:
     std::function<void(const std::string&)> onTextChanged;
 
