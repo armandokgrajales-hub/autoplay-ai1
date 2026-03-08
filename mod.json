@@ -1,0 +1,16 @@
+{
+  "geode": "4.1.0",
+  "gd": {
+    "android": "2.2074"
+  },
+  "id": "tuusuario.autoplay-ai",
+  "name": "AutoPlay AI",
+  "version": "1.0.0",
+  "developer": "tuusuario",
+  "description": "IA de colisiones que juega automaticamente detectando obstaculos cercanos.",
+  "repository": "https://github.com/tuusuario/autoplay-ai",
+  "links": {},
+  "tags": ["gameplay", "automation"],
+  "dependencies": []
+}
+
