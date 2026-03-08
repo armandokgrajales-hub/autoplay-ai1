@@ -407,7 +407,7 @@ class $modify(AIPauseLayer, PauseLayer) {
         if (speedNode) {
             auto* input = typeinfo_cast<CCTextInputNode*>(speedNode);
             if (input && strlen(input->getString()) > 0) {
-                float val = std::atof(input->getString());
+                float val = std::atof(std::string(input->getString()).c_str());
                 if (val > 0.0f && val <= 1000.0f) {
                     g_cfg.speedMult = val / 100.0f;
                 }
@@ -419,7 +419,7 @@ class $modify(AIPauseLayer, PauseLayer) {
         if (tpsNode) {
             auto* input = typeinfo_cast<CCTextInputNode*>(tpsNode);
             if (input && strlen(input->getString()) > 0) {
-                float val = std::atof(input->getString());
+                float val = std::atof(std::string(input->getString()).c_str());
                 if (val >= 30.0f && val <= 1000.0f) {
                     g_cfg.tpsValue = val;
                 }
