@@ -3,10 +3,10 @@
   "gd": {
     "android": "2.2081"
   },
-  "id": "tuusuario.autoplay-ai",
+  "id": "armandokgrajales.autoplay-ai",
   "name": "AutoPlay AI",
   "version": "1.0.0",
-  "developer": "tuusuario",
+  "developer": "armandokgrajales",
   "description": "IA de colisiones que juega automaticamente detectando obstaculos cercanos.",
   "repository": "https://github.com/tuusuario/autoplay-ai",
   "links": {},
