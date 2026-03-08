@@ -1,17 +1,24 @@
+// ============================================================
+//  AutoPlay AI v1.4.0
+//  - Boton flotante visible en juego
+//  - Sin hooks peligrosos
+//  - Ultra seguro para gama baja
+// ============================================================
+
 #include <Geode/Geode.hpp>
 #include <Geode/modify/PlayLayer.hpp>
 #include <Geode/modify/PauseLayer.hpp>
-#include <Geode/modify/CCScheduler.hpp>
 #include <Geode/modify/FMODAudioEngine.hpp>
+
 #include <unordered_set>
-#include <cmath>
 #include <string>
+#include <cmath>
 
 using namespace geode::prelude;
 using namespace cocos2d;
 
 // ============================================================
-//  CONFIGURACION GLOBAL
+//  CONFIG GLOBAL
 // ============================================================
 
 struct AIConfig {
@@ -20,48 +27,59 @@ struct AIConfig {
     bool  speedhack     = false;
     float speedMult     = 1.0f;
     bool  speedMusic    = false;
-    bool  speedProgress = false;
     bool  tpsBypass     = false;
     float tpsValue      = 240.0f;
 };
 
 static AIConfig g_cfg;
-static bool     g_buttonHeld = false;
+static bool     g_buttonHeld  = false;
+static bool     g_levelActive = false;
+static float    g_tpsAccum    = 0.0f;
 
 // ============================================================
-//  IDs PELIGROSOS - hitbox mortal confirmada en GD 2.2
+//  IDs PELIGROSOS
 // ============================================================
 
 static const std::unordered_set<int> HAZARD_IDS = {
-    // Spikes normales
     8, 39, 40, 49,
-    // Spikes invertidos
     395, 396,
-    // Saws
     148, 149, 150,
-    // Sawblades
     184, 185,
-    // Spikes de esquina
     1616, 1617,
-    // Spikes de pared
     1619, 1620,
-    // Obstaculos especiales
     1331, 1332,
-    // Nuevos en 2.2
-    2015, 2016, 1705, 1706,
+    2015, 2016,
+    1705, 1706,
 };
 
-// Distancias de deteccion (en unidades del juego)
-static constexpr float HAZARD_X    = 160.0f;
-static constexpr float HAZARD_Y    = 95.0f;
-static constexpr float SOLID_X     = 95.0f;
-static constexpr float SOLID_Y     = 28.0f;
-// Maximo de objetos revisados por frame - evita lag/crash
-static constexpr unsigned int MAX_OBJ_PER_FRAME = 250;
+static constexpr float        HAZARD_X       = 140.0f;
+static constexpr float        HAZARD_Y       = 90.0f;
+static constexpr float        SOLID_X        = 85.0f;
+static constexpr float        SOLID_Y_MARGIN = 26.0f;
+static constexpr unsigned int MAX_PER_FRAME  = 180;
 
 // ============================================================
 //  HELPERS
 // ============================================================
+
+static float safeParseFloat(const std::string& s, float fallback) {
+    if (s.empty()) return fallback;
+    try {
+        float v = std::stof(s);
+        return (std::isfinite(v) && v > 0.0f) ? v : fallback;
+    } catch (...) {
+        return fallback;
+    }
+}
+
+static void safeRelease() {
+    if (!g_buttonHeld) return;
+    auto* pl = PlayLayer::get();
+    if (pl && pl->m_player1) {
+        pl->m_player1->releaseButton(PlayerButton::Jump);
+    }
+    g_buttonHeld = false;
+}
 
 static bool isHazard(GameObject* obj) {
     if (!obj) return false;
@@ -77,38 +95,13 @@ static bool isSolid(GameObject* obj) {
     return true;
 }
 
-static float parseFloat(CCTextInputNode* input, float fallback) {
-    if (!input) return fallback;
-    std::string s(input->getString());
-    if (s.empty()) return fallback;
-    try {
-        return std::stof(s);
-    } catch (...) {
-        return fallback;
-    }
-}
-
 // ============================================================
-//  HOOK: CCScheduler - TPS Bypass
-// ============================================================
-
-class $modify(AIScheduler, CCScheduler) {
-    void update(float dt) {
-        if (g_cfg.tpsBypass && PlayLayer::get()) {
-            CCScheduler::update(1.0f / g_cfg.tpsValue);
-        } else {
-            CCScheduler::update(dt);
-        }
-    }
-};
-
-// ============================================================
-//  HOOK: FMODAudioEngine - Speed en musica
+//  HOOK: FMODAudioEngine
 // ============================================================
 
 class $modify(AIAudio, FMODAudioEngine) {
     void update(float dt) {
-        if (g_cfg.speedhack && g_cfg.speedMusic && PlayLayer::get()) {
+        if (g_cfg.speedhack && g_cfg.speedMusic && g_levelActive) {
             FMODAudioEngine::update(dt * g_cfg.speedMult);
         } else {
             FMODAudioEngine::update(dt);
@@ -117,41 +110,50 @@ class $modify(AIAudio, FMODAudioEngine) {
 };
 
 // ============================================================
-//  HOOK: PlayLayer - IA + SafeMode + Speedhack
+//  HOOK: PlayLayer
 // ============================================================
 
 class $modify(AIPlayLayer, PlayLayer) {
 
     void update(float dt) {
-        float useDt = (g_cfg.speedhack && !g_cfg.speedProgress)
-                      ? dt * g_cfg.speedMult : dt;
+        // Speedhack
+        float useDt = (g_cfg.speedhack) ? dt * g_cfg.speedMult : dt;
+
+        // TPS Bypass via acumulador (no hookea CCScheduler)
+        if (g_cfg.tpsBypass && g_levelActive) {
+            g_tpsAccum += useDt;
+            float target = 1.0f / g_cfg.tpsValue;
+            if (g_tpsAccum < target) return;
+            g_tpsAccum -= target;
+            useDt = target;
+        }
+
         PlayLayer::update(useDt);
 
-        if (!g_cfg.aiEnabled) return;
+        // ---- IA ----
+        if (!g_cfg.aiEnabled || !g_levelActive) return;
 
         auto* player = m_player1;
         if (!player) return;
-
         if (player->m_isDead) {
-            if (g_buttonHeld) {
-                player->releaseButton(PlayerButton::Jump);
-                g_buttonHeld = false;
-            }
+            safeRelease();
             return;
         }
 
         auto* objects = m_objects;
-        if (!objects || objects->count() == 0) return;
+        if (!objects) return;
 
-        CCPoint playerPos    = player->getPosition();
-        bool    shouldPress  = false;
-        unsigned int total   = objects->count();
+        unsigned int total = objects->count();
+        if (total == 0) return;
+
+        CCPoint playerPos  = player->getPosition();
+        bool    shouldPress = false;
         unsigned int checked = 0;
 
         for (unsigned int i = 0; i < total; i++) {
-            // Seguridad: si el array cambio de tamano, abortar
-            if (!m_objects || m_objects->count() != total) break;
-            if (checked >= MAX_OBJ_PER_FRAME) break;
+            if (checked >= MAX_PER_FRAME) break;
+            // Si el array cambio de tamanio, abortar
+            if (objects->count() != total) break;
 
             CCObject* raw = objects->objectAtIndex(i);
             if (!raw) continue;
@@ -166,19 +168,15 @@ class $modify(AIPlayLayer, PlayLayer) {
 
             CCPoint objPos = obj->getPosition();
             float   dX     = objPos.x - playerPos.x;
-
             if (dX < -10.0f || dX > HAZARD_X) continue;
 
             float dY = std::abs(objPos.y - playerPos.y);
             if (dY > HAZARD_Y) continue;
 
-            if (isHazard(obj)) {
-                shouldPress = true;
-                break;
-            }
+            if (isHazard(obj)) { shouldPress = true; break; }
 
             if (isSolid(obj)) {
-                if (dX < SOLID_X && objPos.y >= playerPos.y - SOLID_Y) {
+                if (dX < SOLID_X && objPos.y >= playerPos.y - SOLID_Y_MARGIN) {
                     shouldPress = true;
                     break;
                 }
@@ -196,266 +194,193 @@ class $modify(AIPlayLayer, PlayLayer) {
         }
     }
 
-    // Safe Mode: noclip sin registrar verificacion
+    // Safe Mode = noclip
     void destroyPlayer(PlayerObject* player, GameObject* obj) {
         if (g_cfg.safeMode) return;
         AIPlayLayer::destroyPlayer(player, obj);
     }
 
     void resetLevel() {
-        AIPlayLayer::resetLevel();
         g_buttonHeld = false;
+        g_tpsAccum   = 0.0f;
         if (m_player1) m_player1->releaseButton(PlayerButton::Jump);
+        AIPlayLayer::resetLevel();
+        g_levelActive = true;
     }
 
     void onQuit() {
-        g_buttonHeld = false;
+        g_levelActive = false;
+        g_buttonHeld  = false;
+        g_tpsAccum    = 0.0f;
         if (m_player1) m_player1->releaseButton(PlayerButton::Jump);
         AIPlayLayer::onQuit();
+    }
+
+    // Usar startGame en vez de init para evitar firma incorrecta
+    void startGame() {
+        g_levelActive = true;
+        g_buttonHeld  = false;
+        g_tpsAccum    = 0.0f;
+        AIPlayLayer::startGame();
     }
 };
 
 // ============================================================
-//  GUI QOL - PauseLayer
+//  PANEL QOL - aparece al pausar
 // ============================================================
 
-// Tags para los inputs
-static constexpr int TAG_SPEED_INPUT = 300;
-static constexpr int TAG_TPS_INPUT   = 301;
+static constexpr int TAG_PANEL       = 800;
+static constexpr int TAG_SPEED_INPUT = 801;
+static constexpr int TAG_TPS_INPUT   = 802;
 
 class $modify(AIPauseLayer, PauseLayer) {
 
-    // --- Helpers de UI ---
-
-    CCMenuItemToggle* makeToggle(const char* onText, const char* offText,
-                                  bool state, SEL_MenuHandler sel) {
-        auto lOn  = CCLabelBMFont::create(onText,  "bigFont.fnt");
-        auto lOff = CCLabelBMFont::create(offText, "bigFont.fnt");
-        lOn->setScale(0.38f);
-        lOff->setScale(0.38f);
-        lOn->setColor({0, 220, 80});
-        lOff->setColor({220, 60, 60});
-
+    CCMenuItemToggle* mkTog(const char* on, const char* off,
+                             bool state, SEL_MenuHandler sel) {
+        auto lOn  = CCLabelBMFont::create(on,  "bigFont.fnt");
+        auto lOff = CCLabelBMFont::create(off, "bigFont.fnt");
+        lOn->setScale(0.38f);  lOff->setScale(0.38f);
+        lOn->setColor({0, 210, 70}); lOff->setColor({210, 50, 50});
         auto iOn  = CCMenuItemLabel::create(lOn,  this, sel);
         auto iOff = CCMenuItemLabel::create(lOff, this, sel);
-
-        auto tog = CCMenuItemToggle::createWithTarget(this, sel, iOff, iOn, nullptr);
-        tog->setSelectedIndex(state ? 1 : 0);
-        return tog;
+        auto t = CCMenuItemToggle::createWithTarget(this, sel, iOff, iOn, nullptr);
+        t->setSelectedIndex(state ? 1 : 0);
+        return t;
     }
 
-    CCLabelBMFont* makeRowLabel(const char* text) {
-        auto lbl = CCLabelBMFont::create(text, "bigFont.fnt");
-        lbl->setScale(0.34f);
-        lbl->setColor({200, 220, 255});
-        return lbl;
+    CCLabelBMFont* mkLbl(const char* txt, float sc = 0.32f) {
+        auto l = CCLabelBMFont::create(txt, "bigFont.fnt");
+        l->setScale(sc);
+        l->setColor({200, 215, 255});
+        return l;
     }
 
-    CCTextInputNode* makeInput(const char* placeholder, float w, int tag) {
-        auto node = CCTextInputNode::create(w, 20.0f, placeholder, "bigFont.fnt");
-        node->setMaxLabelScale(0.38f);
-        node->setAllowedChars("0123456789.");
-        node->setTag(tag);
-        return node;
+    CCTextInputNode* mkInput(const char* hint, float w, int tag) {
+        auto n = CCTextInputNode::create(w, 20.0f, hint, "bigFont.fnt");
+        n->setMaxLabelScale(0.35f);
+        n->setAllowedChars("0123456789.");
+        n->setTag(tag);
+        return n;
     }
-
-    // --- Setup principal ---
 
     void customSetup() {
         PauseLayer::customSetup();
 
-        auto winSize = CCDirector::sharedDirector()->getWinSize();
-        float px = winSize.width - 92.0f;
-        float py = winSize.height * 0.5f;
+        auto ws  = CCDirector::sharedDirector()->getWinSize();
+        // Posicion: esquina inferior derecha, siempre visible
+        float px = ws.width - 88.0f;
+        float py = 115.0f;
 
-        // Fondo del panel
+        // Fondo
         auto bg = CCScale9Sprite::create("square02_small.png");
-        bg->setContentSize({176.0f, 215.0f});
+        bg->setContentSize({170.0f, 210.0f});
         bg->setPosition({px, py});
-        bg->setOpacity(210);
-        bg->setColor({8, 8, 18});
+        bg->setOpacity(220);
+        bg->setColor({5, 5, 18});
         bg->setZOrder(9);
         this->addChild(bg);
 
         // Titulo
         auto title = CCLabelBMFont::create("AutoPlay AI", "goldFont.fnt");
-        title->setScale(0.46f);
-        title->setPosition({px, py + 96.0f});
+        title->setScale(0.44f);
+        title->setPosition({px, py + 95.0f});
         this->addChild(title, 11);
 
-        // Linea separadora
-        auto line = CCLayerColor::create({80, 80, 120, 180}, 150.0f, 1.0f);
-        line->setPosition({px - 75.0f, py + 84.0f});
-        this->addChild(line, 11);
-
-        // Menu principal
         auto menu = CCMenu::create();
         menu->setPosition({px, py});
         menu->setZOrder(10);
-        menu->setTag(99);
+        menu->setTag(TAG_PANEL);
 
-        float y = 78.0f;
+        float y = 76.0f;
 
-        // ── Activate AI ──
-        {
-            auto lbl = makeRowLabel("Activate AI");
-            lbl->setPosition({-42.0f, y});
-            menu->addChild(lbl);
+        // Activate AI
+        { auto l = mkLbl("Activate AI"); l->setPosition({-44.0f, y}); menu->addChild(l);
+          auto t = mkTog("ON","OFF", g_cfg.aiEnabled, menu_selector(AIPauseLayer::onAI));
+          t->setPosition({56.0f, y}); menu->addChild(t); y -= 32.0f; }
 
-            auto tog = makeToggle("ON", "OFF", g_cfg.aiEnabled,
-                menu_selector(AIPauseLayer::onToggleAI));
-            tog->setPosition({60.0f, y});
-            menu->addChild(tog);
-            y -= 34.0f;
-        }
+        // Safe Mode
+        { auto l = mkLbl("Safe Mode"); l->setPosition({-44.0f, y}); menu->addChild(l);
+          auto t = mkTog("ON","OFF", g_cfg.safeMode, menu_selector(AIPauseLayer::onSafe));
+          t->setPosition({56.0f, y}); menu->addChild(t); y -= 32.0f; }
 
-        // ── Safe Mode ──
-        {
-            auto lbl = makeRowLabel("Safe Mode");
-            lbl->setPosition({-42.0f, y});
-            menu->addChild(lbl);
+        // Speedhack
+        { auto l = mkLbl("Speedhack"); l->setPosition({-44.0f, y}); menu->addChild(l);
+          auto t = mkTog("ON","OFF", g_cfg.speedhack, menu_selector(AIPauseLayer::onSpeed));
+          t->setPosition({56.0f, y}); menu->addChild(t); y -= 20.0f;
 
-            auto tog = makeToggle("ON", "OFF", g_cfg.safeMode,
-                menu_selector(AIPauseLayer::onToggleSafeMode));
-            tog->setPosition({60.0f, y});
-            menu->addChild(tog);
-            y -= 34.0f;
-        }
+          auto sp = mkInput("Speed%", 55.0f, TAG_SPEED_INPUT);
+          sp->setPosition({-10.0f, y}); menu->addChild(sp); y -= 18.0f;
 
-        // ── Speedhack ──
-        {
-            auto lbl = makeRowLabel("Speedhack");
-            lbl->setPosition({-42.0f, y});
-            menu->addChild(lbl);
+          auto lm = mkLbl("Music", 0.26f); lm->setPosition({-44.0f, y}); menu->addChild(lm);
+          auto tm = mkTog("Y","N", g_cfg.speedMusic, menu_selector(AIPauseLayer::onSpeedMusic));
+          tm->setScale(0.7f); tm->setPosition({-8.0f, y}); menu->addChild(tm); y -= 26.0f; }
 
-            auto tog = makeToggle("ON", "OFF", g_cfg.speedhack,
-                menu_selector(AIPauseLayer::onToggleSpeedhack));
-            tog->setPosition({60.0f, y});
-            menu->addChild(tog);
-            y -= 22.0f;
+        // TPS Bypass
+        { auto l = mkLbl("TPS Bypass"); l->setPosition({-44.0f, y}); menu->addChild(l);
+          auto t = mkTog("ON","OFF", g_cfg.tpsBypass, menu_selector(AIPauseLayer::onTPS));
+          t->setPosition({56.0f, y}); menu->addChild(t); y -= 20.0f;
 
-            // Input velocidad (porcentaje, ej: 150 = 1.5x)
-            auto spInput = makeInput("Speed%", 55.0f, TAG_SPEED_INPUT);
-            spInput->setPosition({-10.0f, y});
-            menu->addChild(spInput);
-            y -= 20.0f;
-
-            // Sub-toggle: musica
-            auto lblM = CCLabelBMFont::create("Music", "bigFont.fnt");
-            lblM->setScale(0.28f);
-            lblM->setColor({170, 200, 255});
-            lblM->setPosition({-42.0f, y});
-            menu->addChild(lblM);
-
-            auto togM = makeToggle("Y", "N", g_cfg.speedMusic,
-                menu_selector(AIPauseLayer::onToggleSpeedMusic));
-            togM->setScale(0.75f);
-            togM->setPosition({-5.0f, y});
-            menu->addChild(togM);
-
-            // Sub-toggle: progreso
-            auto lblP = CCLabelBMFont::create("Progress", "bigFont.fnt");
-            lblP->setScale(0.28f);
-            lblP->setColor({170, 200, 255});
-            lblP->setPosition({30.0f, y});
-            menu->addChild(lblP);
-
-            auto togP = makeToggle("Y", "N", g_cfg.speedProgress,
-                menu_selector(AIPauseLayer::onToggleSpeedProgress));
-            togP->setScale(0.75f);
-            togP->setPosition({75.0f, y});
-            menu->addChild(togP);
-            y -= 30.0f;
-        }
-
-        // ── TPS Bypass ──
-        {
-            auto lbl = makeRowLabel("TPS Bypass");
-            lbl->setPosition({-42.0f, y});
-            menu->addChild(lbl);
-
-            auto tog = makeToggle("ON", "OFF", g_cfg.tpsBypass,
-                menu_selector(AIPauseLayer::onToggleTPS));
-            tog->setPosition({60.0f, y});
-            menu->addChild(tog);
-            y -= 22.0f;
-
-            // Input TPS (ej: 240)
-            auto tpsInput = makeInput("TPS (fps)", 65.0f, TAG_TPS_INPUT);
-            tpsInput->setPosition({0.0f, y});
-            menu->addChild(tpsInput);
-        }
+          auto tp = mkInput("FPS", 55.0f, TAG_TPS_INPUT);
+          tp->setPosition({-10.0f, y}); menu->addChild(tp); }
 
         this->addChild(menu);
-        this->schedule(schedule_selector(AIPauseLayer::syncInputs), 0.3f);
+        this->schedule(schedule_selector(AIPauseLayer::syncInputs), 0.4f);
     }
 
-    // Leer inputs periodicamente
     void syncInputs(float) {
-        auto* menu = typeinfo_cast<CCMenu*>(this->getChildByTag(99));
+        auto* menu = typeinfo_cast<CCMenu*>(this->getChildByTag(TAG_PANEL));
         if (!menu) return;
 
-        auto* sNode = typeinfo_cast<CCTextInputNode*>(menu->getChildByTag(TAG_SPEED_INPUT));
-        if (sNode) {
-            float v = parseFloat(sNode, 100.0f);
-            if (v >= 10.0f && v <= 2000.0f) g_cfg.speedMult = v / 100.0f;
+        auto* spN = typeinfo_cast<CCTextInputNode*>(menu->getChildByTag(TAG_SPEED_INPUT));
+        if (spN) {
+            float v = safeParseFloat(std::string(spN->getString()), 100.0f);
+            if (v >= 1.0f && v <= 2000.0f) g_cfg.speedMult = v / 100.0f;
         }
 
-        auto* tNode = typeinfo_cast<CCTextInputNode*>(menu->getChildByTag(TAG_TPS_INPUT));
-        if (tNode) {
-            float v = parseFloat(tNode, 240.0f);
+        auto* tpN = typeinfo_cast<CCTextInputNode*>(menu->getChildByTag(TAG_TPS_INPUT));
+        if (tpN) {
+            float v = safeParseFloat(std::string(tpN->getString()), 240.0f);
             if (v >= 30.0f && v <= 1000.0f) g_cfg.tpsValue = v;
         }
     }
 
-    // --- Callbacks de toggles ---
-
-    void onToggleAI(CCObject*) {
+    void onAI(CCObject*) {
         g_cfg.aiEnabled = !g_cfg.aiEnabled;
+        if (!g_cfg.aiEnabled) safeRelease();
         Notification::create(g_cfg.aiEnabled ? "AI: ON" : "AI: OFF",
             NotificationIcon::Success)->show();
-        if (!g_cfg.aiEnabled && g_buttonHeld) {
-            auto* pl = PlayLayer::get();
-            if (pl && pl->m_player1) pl->m_player1->releaseButton(PlayerButton::Jump);
-            g_buttonHeld = false;
-        }
     }
 
-    void onToggleSafeMode(CCObject*) {
+    void onSafe(CCObject*) {
         g_cfg.safeMode = !g_cfg.safeMode;
         Notification::create(g_cfg.safeMode ? "Safe Mode: ON" : "Safe Mode: OFF",
             NotificationIcon::Success)->show();
     }
 
-    void onToggleSpeedhack(CCObject*) {
+    void onSpeed(CCObject*) {
         g_cfg.speedhack = !g_cfg.speedhack;
         Notification::create(g_cfg.speedhack ? "Speedhack: ON" : "Speedhack: OFF",
             NotificationIcon::Success)->show();
     }
 
-    void onToggleSpeedMusic(CCObject*) {
+    void onSpeedMusic(CCObject*) {
         g_cfg.speedMusic = !g_cfg.speedMusic;
         Notification::create(g_cfg.speedMusic ? "Speed Music: ON" : "Speed Music: OFF",
             NotificationIcon::Success)->show();
     }
 
-    void onToggleSpeedProgress(CCObject*) {
-        g_cfg.speedProgress = !g_cfg.speedProgress;
-        Notification::create(g_cfg.speedProgress ? "Speed Progress: ON" : "Speed Progress: OFF",
-            NotificationIcon::Success)->show();
-    }
-
-    void onToggleTPS(CCObject*) {
+    void onTPS(CCObject*) {
         g_cfg.tpsBypass = !g_cfg.tpsBypass;
-        Notification::create(g_cfg.tpsBypass ? "TPS Bypass: ON" : "TPS Bypass: OFF",
+        g_tpsAccum = 0.0f;
+        Notification::create(g_cfg.tpsBypass ? "TPS: ON" : "TPS: OFF",
             NotificationIcon::Success)->show();
     }
 };
 
 // ============================================================
-//  ENTRADA DEL MOD
+//  ENTRADA
 // ============================================================
 
 $on_mod(Loaded) {
-    log::info("AutoPlay AI v1.2.0 loaded.");
+    log::info("AutoPlay AI v1.4.0 loaded.");
 }
